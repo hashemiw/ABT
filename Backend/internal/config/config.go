@@ -28,6 +28,9 @@ type AI struct {
 	EnableReal, AllowPaid  bool
 	GeminiKey, GeminiModel string
 	MockMode               string
+	RealCallCap            int
+	GeminiImageSize        string
+	GeminiMaxInputSide     int
 }
 
 type Gen struct {
@@ -203,6 +206,34 @@ func loadAI(get func(string) string, c *Config) error {
 		}
 		if a.GeminiKey == "" || a.GeminiModel == "" {
 			return fmt.Errorf("AI_PROVIDER=gemini requires GEMINI_API_KEY and GEMINI_IMAGE_MODEL")
+		}
+		if c.WorkerConcurrency != 1 {
+			return fmt.Errorf("AI_PROVIDER=gemini requires WORKER_CONCURRENCY=1")
+		}
+		a.RealCallCap, a.GeminiImageSize, a.GeminiMaxInputSide = 2, "1K", 1024
+		if v := get("REAL_AI_MAX_CALLS"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 || n > 1000 {
+				return fmt.Errorf("REAL_AI_MAX_CALLS must be 1..1000")
+			}
+			a.RealCallCap = n
+		}
+		if v := get("GEMINI_IMAGE_SIZE"); v != "" {
+			switch v {
+			case "off": // omit the field entirely
+				a.GeminiImageSize = ""
+			case "512", "1K", "2K", "4K":
+				a.GeminiImageSize = v
+			default:
+				return fmt.Errorf("GEMINI_IMAGE_SIZE must be off, 512, 1K, 2K or 4K")
+			}
+		}
+		if v := get("GEMINI_MAX_INPUT_SIDE"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 256 || n > 4096 {
+				return fmt.Errorf("GEMINI_MAX_INPUT_SIDE must be 256..4096")
+			}
+			a.GeminiMaxInputSide = n
 		}
 	default:
 		return fmt.Errorf("AI_PROVIDER must be mock or gemini")

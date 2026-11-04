@@ -58,7 +58,7 @@ func TestPostgresMigrations(t *testing.T) {
 		}
 	}
 	var count int
-	if err = pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil || count != 2 {
+	if err = pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil || count != 3 {
 		t.Fatalf("versions=%d error=%v", count, err)
 	}
 	for _, table := range []string{"users", "sessions", "media_assets", "style_presets", "generations", "generation_jobs", "feedback"} {
@@ -115,11 +115,13 @@ func TestPostgresMigrations(t *testing.T) {
 		t.Fatal("checksum tampering accepted")
 	}
 	// Down SQL is destructive and used only inside this disposable schema.
-	down, err := files.ReadFile("000001_initial.down.sql")
-	if err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"000003_provider_calls.down.sql", "000002_generation_m2.down.sql", "000001_initial.down.sql"} {
+		down, err := files.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		must(string(down))
 	}
-	must(string(down))
 	must("DELETE FROM schema_migrations")
 	if err := Up(ctx, pool); err != nil {
 		t.Fatalf("reapply: %v", err)

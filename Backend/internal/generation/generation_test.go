@@ -581,3 +581,101 @@ func TestResultStorageFailureIsNotRetried(t *testing.T) {
 		t.Fatalf("%s %s calls=%d", st, code, rec.calls.Load())
 	}
 }
+
+// ---- Real-call spend controls (exercised with the mock standing in for a paid provider; Name() is "mock") ----
+
+func TestCallBudgetIsPersistentAndCountsUncertainCalls(t *testing.T) {
+	e := newEnv(t, func(c *Config) {
+		c.RealCallCap = 2
+		c.ProviderName = "mock"
+		c.ProviderTimeout = 100 * time.Millisecond
+		c.MaxActive = 10
+	}, nil)
+	ctx := context.Background()
+	u := e.user()
+	src, _ := e.source(u, "ready")
+	g1, g2, g3 := e.create(u, src, "a"), e.create(u, src, "b"), e.create(u, src, "c")
+
+	rec := &recorder{inner: provider.NewMock(provider.ModeTimeout)} // uncertain outcome must still consume budget
+	e.worker(rec, "w1").RunOnce(ctx)
+	rec2 := &recorder{inner: provider.NewMock("")}
+	e.worker(rec2, "w2").RunOnce(ctx)
+	// "Restart": brand-new worker and service objects share only the database.
+	rec3 := &recorder{inner: provider.NewMock("")}
+	e.worker(rec3, "w3-after-restart").RunOnce(ctx)
+
+	if rec.calls.Load() != 1 || rec2.calls.Load() != 1 || rec3.calls.Load() != 0 {
+		t.Fatalf("calls %d %d %d (third must be refused before the provider)", rec.calls.Load(), rec2.calls.Load(), rec3.calls.Load())
+	}
+	if st, code := e.status(g3.ID); st != "failed" || code != "AI_BUDGET_EXHAUSTED" {
+		t.Fatalf("%s %s", st, code)
+	}
+	if st, code := e.status(g1.ID); st != "failed" || code != "PROVIDER_TIMEOUT" {
+		t.Fatalf("%s %s", st, code)
+	}
+	_ = g2
+	var n, unknown int
+	e.db.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE outcome='unknown') FROM provider_calls`).Scan(&n, &unknown)
+	if n != 2 {
+		t.Fatalf("ledger rows=%d", n)
+	}
+	// New requests are refused up front once the budget is gone.
+	svc2 := New(e.db, e.st, e.cfg)
+	if _, err := svc2.Create(ctx, u, "d", CreateRequest{SourceAssetID: src, PresetID: "old_money"}); code(err) != "AI_BUDGET_EXHAUSTED" {
+		t.Fatalf("create after exhaustion: %v", err)
+	}
+}
+
+func TestBudgetRaceNeverExceedsCap(t *testing.T) {
+	e := newEnv(t, func(c *Config) { c.RealCallCap = 3; c.ProviderName = "mock"; c.MaxActive = 20 }, nil)
+	u := e.user()
+	src, _ := e.source(u, "ready")
+	for i := 0; i < 8; i++ {
+		e.create(u, src, fmt.Sprintf("k%d", i))
+	}
+	rec := &recorder{inner: provider.NewMock("")}
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			w := e.worker(rec, fmt.Sprintf("w%d", i))
+			for n := 0; n < 4; n++ {
+				w.RunOnce(context.Background())
+			}
+		}(i)
+	}
+	wg.Wait()
+	if rec.calls.Load() != 3 {
+		t.Fatalf("provider called %d times with cap 3", rec.calls.Load())
+	}
+}
+
+func TestNoAutomaticRetryWhenMaxAttemptsIsOne(t *testing.T) {
+	e := newEnv(t, func(c *Config) { c.MaxAttempts = 1 }, nil) // how app.go configures real providers
+	u := e.user()
+	src, _ := e.source(u, "ready")
+	g := e.create(u, src, "k")
+	rec := &recorder{inner: provider.NewMock(provider.ModeBusy)} // a 429/503-style "not executed" failure
+	w := e.worker(rec, "w")
+	for i := 0; i < 4; i++ {
+		w.RunOnce(context.Background())
+		time.Sleep(30 * time.Millisecond)
+	}
+	if st, code := e.status(g.ID); st != "failed" || code != "PROVIDER_UNAVAILABLE" || rec.calls.Load() != 1 {
+		t.Fatalf("%s %s calls=%d", st, code, rec.calls.Load())
+	}
+}
+
+func TestProviderInputIsDownscaled(t *testing.T) {
+	e := newEnv(t, func(c *Config) { c.MaxProviderSide = 64 }, nil)
+	u := e.user()
+	src, _ := e.source(u, "ready") // 160x160
+	e.create(u, src, "k")
+	rec := &recorder{inner: provider.NewMock("")}
+	e.worker(rec, "w").RunOnce(context.Background())
+	im, _, err := image.DecodeConfig(bytes.NewReader(rec.last.Image))
+	if err != nil || im.Width != 64 || im.Height != 64 {
+		t.Fatalf("provider received %+v %v", im, err)
+	}
+}

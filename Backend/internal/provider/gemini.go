@@ -18,13 +18,17 @@ import (
 // https://aistudio.google.com/api-reference/generate-content , https://aistudio.google.com/docs/image-generation
 // It is only constructed when config validation has allowed real, paid calls.
 type Gemini struct {
-	apiKey, model, base string
-	hc                  *http.Client
+	apiKey, model, base, imageSize string
+	hc                             *http.Client
 }
 
 const geminiBase = "https://generativelanguage.googleapis.com"
 
-func NewGemini(apiKey, model string) *Gemini { return newGemini(apiKey, model, geminiBase) }
+func NewGemini(apiKey, model, imageSize string) *Gemini {
+	g := newGemini(apiKey, model, geminiBase)
+	g.imageSize = imageSize
+	return g
+}
 
 func newGemini(apiKey, model, base string) *Gemini {
 	// No client-level timeout: the worker's context is the single deadline.
@@ -60,6 +64,14 @@ type gResponse struct {
 	ModelVersion string `json:"modelVersion"`
 }
 
+func (g *Gemini) genConfig() map[string]any {
+	cfg := map[string]any{"responseModalities": []string{"TEXT", "IMAGE"}}
+	if g.imageSize != "" {
+		cfg["imageConfig"] = map[string]string{"imageSize": g.imageSize}
+	}
+	return cfg
+}
+
 func (g *Gemini) Edit(ctx context.Context, in Input) (*Output, error) {
 	start := time.Now()
 	body, _ := json.Marshal(map[string]any{
@@ -67,7 +79,7 @@ func (g *Gemini) Edit(ctx context.Context, in Input) (*Output, error) {
 			map[string]any{"text": in.Prompt},
 			map[string]any{"inlineData": map[string]string{"mimeType": in.MIME, "data": base64.StdEncoding.EncodeToString(in.Image)}},
 		}}},
-		"generationConfig": map[string]any{"responseModalities": []string{"TEXT", "IMAGE"}},
+		"generationConfig": g.genConfig(),
 	})
 	u := g.base + "/v1beta/models/" + url.PathEscape(g.model) + ":generateContent"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))

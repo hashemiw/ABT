@@ -78,8 +78,18 @@ func TestAISafetyMatrix(t *testing.T) {
 			t.Errorf("%s: expected rejection", name)
 		}
 	}
+	bad["gemini concurrency 2"] = map[string]string{"AI_PROVIDER": "gemini", "ENABLE_REAL_AI_CALLS": "true", "ALLOW_PAID_AI_CALLS": "true", "GEMINI_API_KEY": "k", "GEMINI_IMAGE_MODEL": "m", "WORKER_CONCURRENCY": "2"}
+	bad["bad cap"] = map[string]string{"AI_PROVIDER": "gemini", "ENABLE_REAL_AI_CALLS": "true", "ALLOW_PAID_AI_CALLS": "true", "GEMINI_API_KEY": "k", "GEMINI_IMAGE_MODEL": "m", "REAL_AI_MAX_CALLS": "0"}
+	bad["bad size"] = map[string]string{"AI_PROVIDER": "gemini", "ENABLE_REAL_AI_CALLS": "true", "ALLOW_PAID_AI_CALLS": "true", "GEMINI_API_KEY": "k", "GEMINI_IMAGE_MODEL": "m", "GEMINI_IMAGE_SIZE": "8K"}
+	for name, kv := range bad {
+		if _, err := with(kv); err == nil {
+			t.Errorf("%s: expected rejection", name)
+		}
+	}
 	ok := map[string]string{"AI_PROVIDER": "gemini", "ENABLE_REAL_AI_CALLS": "true", "ALLOW_PAID_AI_CALLS": "true", "GEMINI_API_KEY": "k", "GEMINI_IMAGE_MODEL": "m"}
 	if c, err := with(ok); err != nil || c.AI.Provider != "gemini" {
 		t.Fatalf("explicit opt-in must load: %v", err)
+	} else if c.AI.RealCallCap != 2 || c.AI.GeminiImageSize != "1K" || c.AI.GeminiMaxInputSide != 1024 {
+		t.Fatalf("conservative defaults expected: %+v", c.AI)
 	}
 }

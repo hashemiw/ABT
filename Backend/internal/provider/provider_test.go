@@ -147,8 +147,17 @@ func TestGeminiRequestShapeAgainstLocalServer(t *testing.T) {
 	if inl["mimeType"] != "image/jpeg" || !bytes.Equal(dec, src) {
 		t.Fatal("source bytes/MIME not transferred exactly")
 	}
-	if m := gotBody["generationConfig"].(map[string]any)["responseModalities"].([]any); len(m) != 2 {
+	gc := gotBody["generationConfig"].(map[string]any)
+	if m := gc["responseModalities"].([]any); len(m) != 2 {
 		t.Fatal("responseModalities")
+	}
+	if _, has := gc["imageConfig"]; has {
+		t.Fatal("imageConfig must be omitted unless configured")
+	}
+	sized := newGemini("k", "m", srv.URL)
+	sized.imageSize = "1K"
+	if sized.genConfig()["imageConfig"].(map[string]string)["imageSize"] != "1K" {
+		t.Fatal("imageSize not applied")
 	}
 }
 
@@ -180,5 +189,24 @@ func TestGeminiTimeoutIsUncertainAndLeaksNoKey(t *testing.T) {
 	e := AsError(err)
 	if e.Kind != Uncertain || e.Code != "PROVIDER_TIMEOUT" || strings.Contains(err.Error(), "SECRET-KEY") {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestDownscaleJPEG(t *testing.T) {
+	big := image.NewRGBA(image.Rect(0, 0, 2000, 1000))
+	var b bytes.Buffer
+	jpeg.Encode(&b, big, nil)
+	out, err := DownscaleJPEG(b.Bytes(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, _ := image.DecodeConfig(bytes.NewReader(out))
+	if cfg.Width != 1024 || cfg.Height != 512 {
+		t.Fatalf("%dx%d", cfg.Width, cfg.Height)
+	}
+	small := testJPEG(t, color.White)
+	same, _ := DownscaleJPEG(small, 1024)
+	if !bytes.Equal(same, small) {
+		t.Fatal("small image must pass through unchanged")
 	}
 }

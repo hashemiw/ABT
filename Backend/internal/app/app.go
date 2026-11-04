@@ -40,14 +40,20 @@ func Main(role string) int {
 	gcfg := generation.Config{MaxActive: c.Gen.MaxActive, MaxPerDay: c.Gen.MaxPerDay, MaxInstruction: c.Gen.MaxChars, MaxAttempts: c.Gen.MaxAttempts,
 		Lease: c.Gen.Lease, ProviderTimeout: c.Gen.Timeout, RetryBackoff: 5 * time.Second, PollEvery: time.Second, DownloadTTL: c.Media.DownloadURLTTL,
 		MaxSourceBytes: c.Media.MaxUploadBytes, MaxOutputBytes: 20 << 20, MaxPixels: c.Media.MaxPixels, MinSide: c.Media.MinSide}
+	gcfg.ProviderName = "mock"
+	if c.AI.Provider == "gemini" {
+		// Real, paid provider: no automatic retries (not even 429/503), a persistent call cap, bounded input size.
+		gcfg.ProviderName, gcfg.ProviderModel = "gemini", c.AI.GeminiModel
+		gcfg.MaxAttempts, gcfg.RealCallCap, gcfg.MaxProviderSide = 1, c.AI.RealCallCap, c.AI.GeminiMaxInputSide
+	}
 	genSvc := generation.New(db, st, gcfg)
 	if role == "worker" {
 		var prov provider.ImageProvider = provider.NewMock(c.AI.MockMode)
 		if c.AI.Provider == "gemini" { // config.Load has already required both explicit opt-ins
-			prov = provider.NewGemini(c.AI.GeminiKey, c.AI.GeminiModel)
+			prov = provider.NewGemini(c.AI.GeminiKey, c.AI.GeminiModel, c.AI.GeminiImageSize)
 		}
 		host, _ := os.Hostname()
-		log.Info("worker ready", "concurrency", c.WorkerConcurrency, "provider", prov.Name(), "real_ai_calls", c.AI.Provider == "gemini")
+		log.Info("worker ready", "concurrency", c.WorkerConcurrency, "provider", prov.Name(), "real_ai_calls", c.AI.Provider == "gemini", "model", gcfg.ProviderModel, "call_cap", gcfg.RealCallCap)
 		w := generation.NewWorker(db, st, prov, gcfg, host+"-"+strconv.Itoa(os.Getpid()), log)
 		go w.Run(ctx, c.WorkerConcurrency)
 		cleanupLoop(ctx, log, c.MediaSweepInterval, ids, mediaSvc)

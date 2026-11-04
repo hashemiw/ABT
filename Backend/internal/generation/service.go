@@ -32,6 +32,11 @@ type Config struct {
 	MaxOutputBytes  int64
 	MaxPixels       int64
 	MinSide         int
+	// Real-provider spend controls. RealCallCap>0 caps the total number of provider calls ever recorded for
+	// ProviderName in provider_calls (persistent; counts uncertain calls). 0 = no cap (mock).
+	ProviderName, ProviderModel string
+	RealCallCap                 int
+	MaxProviderSide             int // downscale inputs sent to the provider (0 = off)
 }
 
 type Service struct {
@@ -162,6 +167,15 @@ func (s *Service) Create(ctx context.Context, owner, key string, req CreateReque
 	if err = tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE status IN ('queued','processing')), count(*) FILTER (WHERE created_at > now() - interval '24 hours') FROM generations WHERE owner_id=$1`, owner).Scan(&active, &today); err != nil {
 		return nil, unavailable
 	}
+	if s.cfg.RealCallCap > 0 {
+		var used int
+		if err = tx.QueryRow(ctx, `SELECT count(*) FROM provider_calls WHERE provider=$1`, s.cfg.ProviderName).Scan(&used); err != nil {
+			return nil, unavailable
+		}
+		if used >= s.cfg.RealCallCap { // friendly early rejection; the worker re-checks authoritatively before every call
+			return nil, apperr.New(http.StatusTooManyRequests, "AI_BUDGET_EXHAUSTED", "The real image-generation call limit for this server has been reached.")
+		}
+	}
 	if active >= s.cfg.MaxActive || today >= s.cfg.MaxPerDay {
 		return nil, apperr.New(http.StatusTooManyRequests, "GENERATION_LIMIT_REACHED", "You have reached the generation limit. Please wait and try again later.")
 	}
@@ -264,6 +278,7 @@ var safeMessages = map[string]string{
 	"PROVIDER_UNAVAILABLE":     "The image service is busy. Please try again shortly.",
 	"SOURCE_UNAVAILABLE":       "The original photo is no longer available.",
 	"STORAGE_FAILURE":          "We could not save the result. Please try again.",
+	"AI_BUDGET_EXHAUSTED":      "The real image-generation call limit for this server has been reached. No request was sent to the image service.",
 }
 
 // SafeMessage maps an internal failure code to client text; unknown codes get the generic message.

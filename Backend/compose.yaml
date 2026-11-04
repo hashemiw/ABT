@@ -15,6 +15,9 @@ x-app: &app
     GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     GEMINI_IMAGE_MODEL: ${GEMINI_IMAGE_MODEL:-}
     MOCK_PROVIDER_MODE: ${MOCK_PROVIDER_MODE:-}
+    REAL_AI_MAX_CALLS: ${REAL_AI_MAX_CALLS:-}
+    GEMINI_IMAGE_SIZE: ${GEMINI_IMAGE_SIZE:-}
+    GEMINI_MAX_INPUT_SIDE: ${GEMINI_MAX_INPUT_SIDE:-}
     GENERATION_TIMEOUT: ${GENERATION_TIMEOUT:-90s}
     STORAGE_ENDPOINT: http://storage:9000
     # Host baked into signed URLs: must be reachable by the client (simulator/device), not the compose network.

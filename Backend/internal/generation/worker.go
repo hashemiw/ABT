@@ -117,7 +117,47 @@ func (w *Worker) claim(ctx context.Context) (*claim, error) {
 // fenced is the WHERE clause every claimed-job write shares.
 const fenced = `generation_id=$1 AND claim_token=$2::uuid AND lease_expires_at > now()`
 
-var errLost = errors.New("claim lost")
+var (
+	errLost   = errors.New("claim lost")
+	errBudget = errors.New("provider call budget exhausted")
+)
+
+// startCall atomically (a) re-checks the lease, (b) enforces the call budget under a global advisory lock,
+// (c) inserts the ledger row and (d) sets provider_call_started_at. Nothing is called if any step fails.
+func (w *Worker) startCall(ctx context.Context, c *claim) (int64, error) {
+	tx, err := w.db.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(context.Background())
+	if w.cfg.RealCallCap > 0 {
+		if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('provider-budget:'||$1,0))`, w.prov.Name()); err != nil {
+			return 0, err
+		}
+		var used int
+		if err = tx.QueryRow(ctx, `SELECT count(*) FROM provider_calls WHERE provider=$1`, w.prov.Name()).Scan(&used); err != nil {
+			return 0, err
+		}
+		if used >= w.cfg.RealCallCap {
+			return 0, errBudget
+		}
+	}
+	n, err := tx.Exec(ctx, `UPDATE generation_jobs SET provider_call_started_at=now(), updated_at=now() WHERE `+fenced, c.genID, c.token)
+	if err != nil || n.RowsAffected() != 1 {
+		return 0, errLost
+	}
+	var id int64
+	if err = tx.QueryRow(ctx, `INSERT INTO provider_calls(generation_id, provider, model) VALUES ($1,$2,$3) RETURNING id`, c.genID, w.prov.Name(), w.cfg.ProviderModel).Scan(&id); err != nil {
+		return 0, err
+	}
+	return id, tx.Commit(ctx)
+}
+
+// endCall records the outcome; if it never runs (crash) the row stays 'unknown' and still counts.
+func (w *Worker) endCall(ctx context.Context, id int64, outcome, code string, latency time.Duration, usage map[string]int) {
+	u, _ := json.Marshal(usage)
+	_, _ = w.db.Exec(context.WithoutCancel(ctx), `UPDATE provider_calls SET outcome=$2, error_code=NULLIF($3,''), latency_ms=$4, usage=$5 WHERE id=$1`, id, outcome, code, latency.Milliseconds(), u)
+}
 
 func (w *Worker) process(ctx context.Context, c *claim) {
 	log := w.log.With("generation", c.genID, "attempt", c.attempt)
@@ -154,10 +194,21 @@ func (w *Worker) process(ctx context.Context, c *claim) {
 	if mime != nil {
 		in.MIME = *mime
 	}
-	// Record the intent to call BEFORE calling, fenced, in its own short statement.
-	if n, err := w.db.Exec(ctx, `UPDATE generation_jobs SET provider_call_started_at=now(), updated_at=now() WHERE `+fenced, c.genID, c.token); err != nil || n.RowsAffected() != 1 {
-		log.Warn("claim lost before provider call")
+	// Record the intent to call BEFORE calling (fenced, one transaction) and enforce the persistent call budget.
+	callID, berr := w.startCall(ctx, c)
+	if errors.Is(berr, errBudget) {
+		log.Warn("real-call budget exhausted; provider not called")
+		w.finish(ctx, c, "AI_BUDGET_EXHAUSTED", false)
 		return
+	}
+	if berr != nil {
+		log.Warn("claim lost or ledger unavailable before provider call; provider not called")
+		return
+	}
+	if w.cfg.MaxProviderSide > 0 {
+		if small, derr := provider.DownscaleJPEG(src, w.cfg.MaxProviderSide); derr == nil {
+			in.Image, in.MIME = small, "image/jpeg"
+		}
 	}
 	pctx, cancel := context.WithTimeout(ctx, w.cfg.ProviderTimeout)
 	var lost bool
@@ -181,10 +232,12 @@ func (w *Worker) process(ctx context.Context, c *claim) {
 	}
 	if perr != nil {
 		pe := provider.AsError(perr)
+		w.endCall(ctx, callID, "failed", pe.Code, time.Since(start), nil)
 		log.Warn("provider call failed", "code", pe.Code, "kind", int(pe.Kind), "latency_ms", time.Since(start).Milliseconds())
 		w.finish(ctx, c, pe.Code, pe.Kind == provider.NotExecuted)
 		return
 	}
+	w.endCall(ctx, callID, "succeeded", "", time.Since(start), out.Usage)
 	if _, verr := provider.ValidateOutput(out.Image, src, w.cfg.MaxOutputBytes, w.cfg.MaxPixels); verr != nil {
 		w.finish(ctx, c, provider.AsError(verr).Code, false)
 		return
