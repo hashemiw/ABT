@@ -105,20 +105,37 @@ func (g *Gemini) Edit(ctx context.Context, in Input) (*Output, error) {
 		return nil, &Error{Uncertain, "PROVIDER_FAILURE", "response read failed"}
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, classifyHTTP(resp.StatusCode)
+		return nil, classifyHTTP(resp.StatusCode, raw)
 	}
 	return parseGemini(raw, g.model, time.Since(start))
 }
 
-// classifyHTTP: 429 and 503 are rejections before processing (safe to retry); other 5xx may have executed.
-func classifyHTTP(status int) *Error {
+// classifyHTTP maps vendor HTTP errors to cost-safe kinds and user-meaningful codes. 429/503 are rejections before
+// processing (not executed); other 5xx may have executed. The vendor's own error status/message (never secrets) is kept
+// in Msg for operators.
+func classifyHTTP(status int, body []byte) *Error {
+	var e struct {
+		Error struct{ Status, Message string }
+	}
+	_ = json.Unmarshal(body, &e)
+	msg := e.Error.Status + ": " + e.Error.Message
+	if len(msg) > 300 {
+		msg = msg[:300]
+	}
+	detail := fmt.Sprintf("http %d %s", status, msg)
 	switch {
-	case status == 429 || status == 503:
-		return &Error{NotExecuted, "PROVIDER_UNAVAILABLE", fmt.Sprintf("http %d", status)}
+	case status == 429:
+		return &Error{NotExecuted, "PROVIDER_QUOTA", detail}
+	case status == 503:
+		return &Error{NotExecuted, "PROVIDER_UNAVAILABLE", detail}
 	case status == 408 || status == 504 || status >= 500:
-		return &Error{Uncertain, "PROVIDER_FAILURE", fmt.Sprintf("http %d", status)}
-	default: // 400/401/403/404: our request, key or model is wrong
-		return &Error{Permanent, "PROVIDER_FAILURE", fmt.Sprintf("http %d", status)}
+		return &Error{Uncertain, "PROVIDER_FAILURE", detail}
+	case status == 401 || status == 403:
+		return &Error{Permanent, "PROVIDER_AUTH", detail}
+	case status == 404:
+		return &Error{Permanent, "PROVIDER_MODEL", detail}
+	default: // 400 etc.: our request is wrong
+		return &Error{Permanent, "PROVIDER_FAILURE", detail}
 	}
 }
 

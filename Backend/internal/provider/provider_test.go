@@ -162,11 +162,15 @@ func TestGeminiRequestShapeAgainstLocalServer(t *testing.T) {
 }
 
 func TestGeminiHTTPClassification(t *testing.T) {
-	for status, kind := range map[int]Kind{429: NotExecuted, 503: NotExecuted, 500: Uncertain, 504: Uncertain, 400: Permanent, 403: Permanent} {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
+	codes := map[int]string{429: "PROVIDER_QUOTA", 503: "PROVIDER_UNAVAILABLE", 500: "PROVIDER_FAILURE", 504: "PROVIDER_FAILURE", 400: "PROVIDER_FAILURE", 403: "PROVIDER_AUTH", 401: "PROVIDER_AUTH", 404: "PROVIDER_MODEL"}
+	for status, kind := range map[int]Kind{429: NotExecuted, 503: NotExecuted, 500: Uncertain, 504: Uncertain, 400: Permanent, 403: Permanent, 401: Permanent, 404: Permanent} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			w.Write([]byte(`{"error":{"code":1,"status":"RESOURCE_EXHAUSTED","message":"quota"}}`))
+		}))
 		_, err := newGemini("k", "m", srv.URL).Edit(context.Background(), Input{Image: []byte("x"), MIME: "image/jpeg"})
 		srv.Close()
-		if AsError(err).Kind != kind {
+		if e := AsError(err); e.Kind != kind || e.Code != codes[status] {
 			t.Errorf("status %d -> %v", status, err)
 		}
 	}

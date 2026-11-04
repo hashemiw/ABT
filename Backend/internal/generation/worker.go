@@ -232,8 +232,8 @@ func (w *Worker) process(ctx context.Context, c *claim) {
 	}
 	if perr != nil {
 		pe := provider.AsError(perr)
-		w.endCall(ctx, callID, "failed", pe.Code, time.Since(start), nil)
-		log.Warn("provider call failed", "code", pe.Code, "kind", int(pe.Kind), "latency_ms", time.Since(start).Milliseconds())
+		w.endCall(ctx, callID, "failed", pe.Code+": "+pe.Msg, time.Since(start), nil)
+		log.Warn("provider call failed", "code", pe.Code, "kind", int(pe.Kind), "latency_ms", time.Since(start).Milliseconds(), "detail", pe.Msg)
 		w.finish(ctx, c, pe.Code, pe.Kind == provider.NotExecuted)
 		return
 	}
