@@ -1,0 +1,67 @@
+openapi: 3.1.0
+info:
+  title: AI Beauty Tool — M0 health API
+  version: 0.1.0
+  description: Only M0 endpoints are implemented. Business endpoints are deferred.
+paths:
+  /health/live:
+    get:
+      operationId: getLiveness
+      summary: Check that the API process is alive
+      responses:
+        '200':
+          $ref: '#/components/responses/Healthy'
+        '405':
+          $ref: '#/components/responses/Error'
+  /health/ready:
+    get:
+      operationId: getReadiness
+      summary: Check PostgreSQL connectivity within the configured deadline
+      responses:
+        '200':
+          $ref: '#/components/responses/Healthy'
+        '503':
+          $ref: '#/components/responses/Error'
+        '405':
+          $ref: '#/components/responses/Error'
+components:
+  responses:
+    Healthy:
+      description: Healthy
+      headers:
+        X-Request-ID:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [status]
+            additionalProperties: false
+            properties:
+              status:
+                const: ok
+    Error:
+      description: Safe error envelope (SERVICE_UNAVAILABLE for failed readiness)
+      headers:
+        X-Request-ID:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            additionalProperties: false
+            properties:
+              error:
+                type: object
+                required: [code, message, request_id]
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
