@@ -3,15 +3,18 @@ package app
 import (
 	"abt/backend/internal/config"
 	"abt/backend/internal/database"
+	"abt/backend/internal/generation"
 	"abt/backend/internal/httpapi"
 	"abt/backend/internal/identity"
 	"abt/backend/internal/media"
+	"abt/backend/internal/provider"
 	"abt/backend/internal/storage"
 	"context"
 	"log/slog"
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -34,8 +37,19 @@ func Main(role string) int {
 	st := storage.New(storage.Config(c.Storage))
 	ids := identity.New(db, c.SessionTTL)
 	mediaSvc := media.New(db, st, c.Media)
+	gcfg := generation.Config{MaxActive: c.Gen.MaxActive, MaxPerDay: c.Gen.MaxPerDay, MaxInstruction: c.Gen.MaxChars, MaxAttempts: c.Gen.MaxAttempts,
+		Lease: c.Gen.Lease, ProviderTimeout: c.Gen.Timeout, RetryBackoff: 5 * time.Second, PollEvery: time.Second, DownloadTTL: c.Media.DownloadURLTTL,
+		MaxSourceBytes: c.Media.MaxUploadBytes, MaxOutputBytes: 20 << 20, MaxPixels: c.Media.MaxPixels, MinSide: c.Media.MinSide}
+	genSvc := generation.New(db, st, gcfg)
 	if role == "worker" {
-		log.Info("worker ready; running media cleanup only", "concurrency", c.WorkerConcurrency)
+		var prov provider.ImageProvider = provider.NewMock(c.AI.MockMode)
+		if c.AI.Provider == "gemini" { // config.Load has already required both explicit opt-ins
+			prov = provider.NewGemini(c.AI.GeminiKey, c.AI.GeminiModel)
+		}
+		host, _ := os.Hostname()
+		log.Info("worker ready", "concurrency", c.WorkerConcurrency, "provider", prov.Name(), "real_ai_calls", c.AI.Provider == "gemini")
+		w := generation.NewWorker(db, st, prov, gcfg, host+"-"+strconv.Itoa(os.Getpid()), log)
+		go w.Run(ctx, c.WorkerConcurrency)
 		cleanupLoop(ctx, log, c.MediaSweepInterval, ids, mediaSvc)
 	} else {
 		listener, err := net.Listen("tcp", c.HTTPAddr)
@@ -44,7 +58,7 @@ func Main(role string) int {
 			return 1
 		}
 		log.Info("API ready", "address", listener.Addr().String())
-		h := httpapi.Handler(httpapi.Deps{DB: db, DBTimeout: c.DBTimeout, Log: log, Identity: ids, Media: mediaSvc, SessionsPerMinute: c.SessionsPerMinute})
+		h := httpapi.Handler(httpapi.Deps{DB: db, DBTimeout: c.DBTimeout, Log: log, Identity: ids, Media: mediaSvc, Generation: genSvc, SessionsPerMinute: c.SessionsPerMinute})
 		if err := httpapi.Serve(ctx, listener, h, c.ShutdownTimeout); err != nil {
 			log.Error("HTTP server stopped with error")
 			return 1

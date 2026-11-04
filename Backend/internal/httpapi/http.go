@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"abt/backend/internal/apperr"
+	"abt/backend/internal/generation"
 	"abt/backend/internal/identity"
 	"abt/backend/internal/media"
 )
@@ -27,6 +28,7 @@ type Deps struct {
 	Log               *slog.Logger
 	Identity          *identity.Service // nil disables /v1 routes (health-only tests)
 	Media             *media.Service
+	Generation        *generation.Service // nil disables generation routes
 	SessionsPerMinute int
 }
 
@@ -77,6 +79,12 @@ func Handler(d Deps) http.Handler {
 		route("POST /v1/media/{id}/complete", true, s.completeMedia)
 		route("GET /v1/media/{id}", true, s.getMedia)
 		route("DELETE /v1/media/{id}", true, s.deleteMedia)
+		if d.Generation != nil {
+			route("GET /v1/styles/presets", true, s.listPresets)
+			route("POST /v1/generations", true, s.createGeneration)
+			route("GET /v1/generations/{id}", true, s.getGeneration)
+			route("POST /v1/generations/{id}/cancel", true, s.cancelGeneration)
+		}
 	}
 	return s.wrap(mux)
 }
