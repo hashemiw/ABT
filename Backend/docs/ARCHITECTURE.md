@@ -49,3 +49,26 @@ Before dependent milestones: image and metadata retention including idempotency 
 3. **HEIC server-side support.** *Options:* client converts (current), or add a cgo/libheif decoder. *Recommendation:* keep client conversion; avoids cgo and attack surface.
 4. **Abuse protection before external users.** In-process IP limits are not sufficient beyond a single replica; anonymous tokens are cheap to mint. *Options:* PostgreSQL-backed counters, edge/WAF limits, App Attest. *Recommendation:* decide before external beta; M2 needs per-user generation caps regardless.
 5. **Pixel/size limits.** Defaults (10 MiB, 16 MP, ≥128 px) are guesses pending the Gemini input-limit review in M3.
+
+# M2 addendum — generation (first vertical slice)
+
+Scope: presets, create/get/cancel generation, worker, mock + Gemini adapters, Web wiring. Not built: history list, refinement, feedback, accounts, payments, deployment.
+
+## Decisions (routine, reversible)
+
+- **Prompt:** `style_presets.prompt_template` holds only the outfit description; the code wraps it with versioned instructions (change clothing only; preserve identity, face, skin tone, proportions, pose, background). The final prompt is snapshotted in `generations.instruction_snapshot` with `prompt_version`. User text is trimmed, length-limited, control-character-free, and quoted as an "optional styling note". These are goals, not guarantees.
+- **Create:** one transaction under a per-owner advisory lock: idempotency lookup (fingerprint of source+preset+instruction), source ownership/readiness, active preset, limits (default 2 active, 30 per 24 h), insert generation + job. Idempotency rows are retained with the generation (no purge; decide retention before external testing).
+- **Worker protocol:** claim = `FOR UPDATE SKIP LOCKED` on an available/expired-lease job, `attempt_count+1`, new `claim_token`, lease. Every later write is fenced by `claim_token AND lease_expires_at > now()`. A heartbeat extends the lease while the provider call runs and aborts the call if the claim is lost or the generation is canceled. The provider call holds no transaction or lock.
+- **Uncertain outcomes (cost policy):** `provider_call_started_at` is written (fenced) before every provider call. A job reclaimed with that mark set fails as `PROVIDER_OUTCOME_UNKNOWN` and is **not** retried. Timeouts and transport errors after sending are `Uncertain` and never auto-retried. Only `NotExecuted` failures (HTTP 429/503 before processing, mock "busy") and pre-call failures (source read) are retried, up to `MAX_GENERATION_ATTEMPTS` (3) with linear backoff. A failure to store an already-produced result is not retried either (it would pay twice). Graceful shutdown mid-call leaves the job to lease expiry, which then fails it as unknown.
+- **Results:** stored under `results/{owner}/{generation}-{claim_token}.jpg`, re-encoded to JPEG by the same normalizer as uploads, recorded as a new `media_assets` row (`kind='result'`), so ownership, signed GET and deletion reuse M1. The claim token in the key means a stale worker can only delete its own object. `shortcut:` a crash between object write and commit leaves an unreferenced object (storage client has no list); add a prefix sweeper before production.
+- **Source deletion:** a source deleted before the call fails the job `SOURCE_UNAVAILABLE` (no provider call). A source deleted during the call does not affect that result.
+- **Output validation:** decodable JPEG/PNG, size/pixel caps, and **byte-identical-to-source is a controlled failure** (the original is never returned as a result). Different bytes are not evidence of quality.
+- **Cancel:** queued is effective; processing is best-effort (the provider may still run and bill); result is discarded.
+- **Config safety:** `AI_PROVIDER` is `mock` (default) or `gemini`. `mock` rejects either real flag set. `gemini` requires `ENABLE_REAL_AI_CALLS=true` **and** `ALLOW_PAID_AI_CALLS=true` plus `GEMINI_API_KEY` and `GEMINI_IMAGE_MODEL` (no default model). Enabling real calls never implies paid. Free-tier image editing is not assumed.
+- **Additive API:** `result.provider/model/is_mock`, `download_url_expires_at`; error codes in `openapi.yaml`.
+
+## Gemini adapter (offline-verified only)
+
+`internal/provider/gemini.go` calls `POST /v1beta/models/{model}:generateContent` with `x-goog-api-key`, one text part and one `inlineData` part (exact stored bytes + MIME), `responseModalities: [TEXT, IMAGE]`, and reads the first `inlineData` image of the first candidate. `promptFeedback.blockReason` and `finishReason` SAFETY/IMAGE_SAFETY/PROHIBITED_CONTENT/… map to `PROVIDER_REFUSED`; missing image → `PROVIDER_NO_IMAGE`. Token usage and latency are stored (`generations.usage`, `provider_latency_ms`); no images, prompts, keys or URLs are logged. Verified only against fixtures and a local fake server; **never against the real API**.
+
+Sources (read 2026-11-04): https://aistudio.google.com/api-reference/generate-content , https://aistudio.google.com/docs/image-generation , https://aistudio.google.com/docs/pricing . The docs now steer new work to an "Interactions API"; `generateContent` remains documented/supported, so the adapter uses it. Re-verify the model ID and request shape immediately before the first real call.

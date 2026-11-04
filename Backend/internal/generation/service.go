@@ -50,7 +50,7 @@ type Preset struct{ ID, Name, Category, Description string }
 
 // ListPresets never exposes prompt templates.
 func (s *Service) ListPresets(ctx context.Context) ([]Preset, error) {
-	rows, err := s.db.Query(ctx, `SELECT id,name,category,description FROM style_presets WHERE is_active ORDER BY created_at,id`)
+	rows, err := s.db.Query(ctx, `SELECT id,name,category,description FROM style_presets WHERE is_active ORDER BY name`)
 	if err != nil {
 		return nil, unavailable
 	}
