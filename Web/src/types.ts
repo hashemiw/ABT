@@ -30,35 +30,24 @@ export interface StylePreset {
   name: string;
   category: string;
   description: string;
-  tags?: string[];
-  accent_color?: string;
 }
+
+export type GenerationStatus = 'queued' | 'processing' | 'completed' | 'failed' | 'canceled';
 
 export interface Generation {
   id: string;
-  preset_id?: string;
-  presetId?: string;
-  status: 'queued' | 'processing' | 'completed' | 'failed' | 'canceled';
-  created_at: string;
-  started_at?: string | null;
-  completed_at?: string | null;
-  result?: {
-    asset_id: string;
-    download_url: string;
-    provider?: string;
-    model?: string;
-  } | null;
-  error?: {
-    code: string;
-    message: string;
-  } | null;
-}
-
-export interface GenerationHistoryItem {
-  id: string;
-  status: 'queued' | 'processing' | 'completed' | 'failed' | 'canceled';
+  status: GenerationStatus;
   preset_id: string;
   created_at: string;
-  result_asset_id: string | null;
-  download_url: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  result: {
+    asset_id: string;
+    download_url: string;
+    download_url_expires_at: string;
+    provider: string;
+    model: string;
+    is_mock: boolean;
+  } | null;
+  error: { code: string; message: string } | null;
 }

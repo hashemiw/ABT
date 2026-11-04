@@ -6,6 +6,12 @@ interface StylePresetSelectorProps {
   presets: StylePreset[];
   selectedPresetId: string;
   instruction: string;
+  presetsError: string | null;
+  canGenerate: boolean;
+  generateHint: string | null; // why the button is disabled
+  isSubmitting: boolean;
+  onGenerate: () => void;
+  onReloadPresets: () => void;
   onSelectPreset: (id: string) => void;
   onInstructionChange: (inst: string) => void;
 }
@@ -14,6 +20,12 @@ export const StylePresetSelector: React.FC<StylePresetSelectorProps> = ({
   presets,
   selectedPresetId,
   instruction,
+  presetsError,
+  canGenerate,
+  generateHint,
+  isSubmitting,
+  onGenerate,
+  onReloadPresets,
   onSelectPreset,
   onInstructionChange
 }) => {
@@ -32,6 +44,12 @@ export const StylePresetSelector: React.FC<StylePresetSelectorProps> = ({
           </div>
         </div>
 
+        {presetsError && (
+          <p role="alert" className="text-xs text-red-300 mb-3">
+            Could not load styles: {presetsError}{' '}
+            <button onClick={onReloadPresets} className="underline cursor-pointer">Try again</button>
+          </p>
+        )}
         {/* Preset Cards Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
           {presets.map(preset => {
@@ -62,19 +80,6 @@ export const StylePresetSelector: React.FC<StylePresetSelectorProps> = ({
                   </p>
                 </div>
 
-                {/* Tags */}
-                {preset.tags && (
-                  <div className="flex flex-wrap gap-1 mt-2.5 pt-2 border-t border-slate-800/60">
-                    {preset.tags.slice(0, 3).map(tag => (
-                      <span
-                        key={tag}
-                        className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-medium"
-                      >
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                )}
               </button>
             );
           })}
@@ -100,15 +105,18 @@ export const StylePresetSelector: React.FC<StylePresetSelectorProps> = ({
       {/* Generate Actions */}
       <div className="space-y-3">
         <button
-          disabled
-          className="w-full py-3.5 px-4 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 bg-slate-800 text-slate-500 border border-slate-700/50 cursor-not-allowed"
+          onClick={onGenerate}
+          disabled={!canGenerate}
+          className={`w-full py-3.5 px-4 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all ${
+            canGenerate
+              ? 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white cursor-pointer'
+              : 'bg-slate-800 text-slate-500 border border-slate-700/50 cursor-not-allowed'
+          }`}
         >
           <Wand2 className="w-4 h-4" />
-          <span>Generate Transformation</span>
+          <span>{isSubmitting ? 'Submitting…' : 'Generate Transformation'}</span>
         </button>
-        <p className="text-[11px] text-amber-300/80 text-center">
-          Generation is not available yet: the Go backend implements sessions and media only (M1). Styles shown here are a preview list; real generation arrives in M2.
-        </p>
+        {generateHint && <p className="text-[11px] text-slate-400 text-center">{generateHint}</p>}
       </div>
     </div>
   );
