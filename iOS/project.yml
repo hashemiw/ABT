@@ -1,0 +1,55 @@
+name: ABT
+options:
+  bundleIdPrefix: app.abt
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+configs:
+  Debug: debug
+  Release: release
+targets:
+  ABT:
+    type: application
+    platform: iOS
+    sources: [ABT]
+    info:
+      path: ABT/Info.plist
+      properties:
+        CFBundleDisplayName: AI Beauty Tool
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        ABTAPIBaseURL: $(ABT_API_BASE_URL)
+        # Exempts only local-network/loopback hosts from ATS (simulator + dev backend).
+        # Public hosts still require HTTPS; NSAllowsArbitraryLoads is deliberately not used.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.abt.ABT
+        GENERATE_INFOPLIST_FILE: NO
+        ABT_API_BASE_URL: http:/$()/127.0.0.1:8080
+      configs:
+        Release:
+          # Placeholder: the production origin is undecided; Release must use HTTPS.
+          ABT_API_BASE_URL: https:/$()/api.example.invalid
+  ABTTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [ABTTests]
+    dependencies:
+      - target: ABT
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: app.abt.ABTTests
+schemes:
+  ABT:
+    build:
+      targets: {ABT: all, ABTTests: [test]}
+    test:
+      targets: [ABTTests]

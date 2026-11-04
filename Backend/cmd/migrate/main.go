@@ -3,6 +3,7 @@ package main
 import (
 	"abt/backend/internal/config"
 	"abt/backend/internal/database"
+	"abt/backend/internal/storage"
 	"abt/backend/migrations"
 	"context"
 	"log/slog"
@@ -35,5 +36,12 @@ func run() int {
 		return 1
 	}
 	log.Info("migrations applied")
+	if os.Getenv("STORAGE_ENSURE_BUCKET") == "true" {
+		if err = storage.New(storage.Config(c.Storage)).EnsureBucket(ctx); err != nil {
+			log.Error("storage bucket setup failed", "error", err)
+			return 1
+		}
+		log.Info("storage bucket ready")
+	}
 	return 0
 }

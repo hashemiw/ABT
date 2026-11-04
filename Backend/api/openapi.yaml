@@ -1,37 +1,208 @@
 openapi: 3.1.0
 info:
-  title: AI Beauty Tool — M0 health API
-  version: 0.1.0
-  description: Only M0 endpoints are implemented. Business endpoints are deferred.
+  title: AI Beauty Tool API
+  version: 0.2.0
+  description: |
+    Implemented through M1: health, anonymous sessions and media. Generation, presets and
+    feedback endpoints from the contract specification arrive in later milestones.
+    Timestamps are RFC 3339 UTC. Every response carries X-Request-ID.
+servers:
+  - url: http://127.0.0.1:8080
+    description: Local development only; production requires HTTPS.
+security:
+  - bearerAuth: []
 paths:
   /health/live:
     get:
       operationId: getLiveness
       summary: Check that the API process is alive
+      security: []
       responses:
-        '200':
-          $ref: '#/components/responses/Healthy'
-        '405':
-          $ref: '#/components/responses/Error'
+        '200': {$ref: '#/components/responses/Healthy'}
+        '405': {$ref: '#/components/responses/Error'}
   /health/ready:
     get:
       operationId: getReadiness
       summary: Check PostgreSQL connectivity within the configured deadline
+      security: []
+      responses:
+        '200': {$ref: '#/components/responses/Healthy'}
+        '503': {$ref: '#/components/responses/Error'}
+        '405': {$ref: '#/components/responses/Error'}
+  /v1/sessions:
+    post:
+      operationId: createSession
+      summary: Create an anonymous user and session
+      description: The token is returned only once. Rate limited per client IP (429 RATE_LIMITED, Retry-After).
+      security: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false}
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, session]
+                properties:
+                  user:
+                    type: object
+                    required: [id]
+                    properties: {id: {type: string, format: uuid}}
+                  session:
+                    type: object
+                    required: [token, expires_at]
+                    properties:
+                      token: {type: string, description: Opaque high-entropy bearer token. Store in the Keychain.}
+                      expires_at: {type: string, format: date-time}
+        '400': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/media/upload-intents:
+    post:
+      operationId: createUploadIntent
+      summary: Create a private, temporary upload destination
+      description: |
+        The client must PUT exactly size_bytes bytes with exactly the returned headers to upload.url
+        (storage rejects other sizes or types). Declared values are provisional; the server validates the real
+        object on completion. Accepted types: image/jpeg, image/png (convert HEIC before upload).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [filename, content_type, size_bytes]
+              additionalProperties: false
+              properties:
+                filename: {type: string, minLength: 1, maxLength: 255}
+                content_type: {type: string, enum: [image/jpeg, image/png]}
+                size_bytes: {type: integer, minimum: 1, description: Must not exceed the server's MAX_UPLOAD_BYTES (default 10485760).}
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [asset_id, upload]
+                properties:
+                  asset_id: {type: string, format: uuid}
+                  upload:
+                    type: object
+                    required: [url, method, headers, expires_at]
+                    properties:
+                      url: {type: string, description: Short-lived signed URL. A capability; never log it.}
+                      method: {const: PUT}
+                      headers: {type: object, additionalProperties: {type: string}}
+                      expires_at: {type: string, format: date-time}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '415': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error', description: UPLOAD_LIMIT_REACHED}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/media/{asset_id}/complete:
+    post:
+      operationId: completeMedia
+      summary: Validate the uploaded object and make the asset ready
+      description: |
+        Synchronous. Inspects the real bytes (type by content, pixel and size limits), strips metadata and
+        stores a normalized JPEG. Repeating the call after success returns the same 200; after rejection the
+        same 422. 409 MEDIA_NOT_READY means the object has not been uploaded yet.
+      parameters: [{$ref: '#/components/parameters/AssetId'}]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {type: object, additionalProperties: false}
       responses:
         '200':
-          $ref: '#/components/responses/Healthy'
-        '503':
-          $ref: '#/components/responses/Error'
-        '405':
-          $ref: '#/components/responses/Error'
+          description: Ready
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, status, width, height, content_type]
+                properties:
+                  id: {type: string, format: uuid}
+                  status: {const: ready}
+                  width: {type: integer}
+                  height: {type: integer}
+                  content_type: {const: image/jpeg}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error', description: MEDIA_INVALID}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/media/{asset_id}:
+    get:
+      operationId: getMedia
+      summary: Owned media metadata with a short-lived download URL when ready
+      description: Assets that are deletion_pending or deleted, or owned by someone else, return 404.
+      parameters: [{$ref: '#/components/parameters/AssetId'}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, kind, status, width, height, content_type, download_url, download_url_expires_at]
+                properties:
+                  id: {type: string, format: uuid}
+                  kind: {enum: [original, result]}
+                  status: {enum: [pending_upload, validating, ready, rejected]}
+                  width: {type: [integer, 'null']}
+                  height: {type: [integer, 'null']}
+                  content_type: {type: [string, 'null']}
+                  download_url: {type: [string, 'null'], description: Present only when ready. Refresh by calling this endpoint again.}
+                  download_url_expires_at: {type: [string, 'null'], format: date-time}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: deleteMedia
+      summary: Request deletion of an owned asset
+      description: |
+        Idempotent. The asset becomes inaccessible immediately; the worker removes the stored objects shortly
+        after and leaves a tombstone. Repeats return the current state (deletion_pending, later deleted) with 202
+        and trigger no additional work. Signed download URLs issued earlier stop working once the object is removed.
+      parameters: [{$ref: '#/components/parameters/AssetId'}]
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, status]
+                properties:
+                  id: {type: string, format: uuid}
+                  status: {enum: [deletion_pending, deleted]}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
 components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
+  parameters:
+    AssetId:
+      name: asset_id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
   responses:
     Healthy:
       description: Healthy
       headers:
-        X-Request-ID:
-          schema:
-            type: string
+        X-Request-ID: {schema: {type: string}}
       content:
         application/json:
           schema:
@@ -39,14 +210,15 @@ components:
             required: [status]
             additionalProperties: false
             properties:
-              status:
-                const: ok
+              status: {const: ok}
     Error:
-      description: Safe error envelope (SERVICE_UNAVAILABLE for failed readiness)
+      description: |
+        Safe error envelope. Codes: INVALID_REQUEST, UNAUTHORIZED, RESOURCE_NOT_FOUND, MEDIA_NOT_READY,
+        MEDIA_INVALID, RATE_LIMITED, UPLOAD_LIMIT_REACHED, SERVICE_UNAVAILABLE, INTERNAL_ERROR.
+        RATE_LIMITED and UPLOAD_LIMIT_REACHED are additive to the specification's initial list.
       headers:
-        X-Request-ID:
-          schema:
-            type: string
+        X-Request-ID: {schema: {type: string}}
+        Retry-After: {schema: {type: string}, description: Present on 429.}
       content:
         application/json:
           schema:
@@ -59,9 +231,6 @@ components:
                 required: [code, message, request_id]
                 additionalProperties: false
                 properties:
-                  code:
-                    type: string
-                  message:
-                    type: string
-                  request_id:
-                    type: string
+                  code: {type: string}
+                  message: {type: string}
+                  request_id: {type: string}

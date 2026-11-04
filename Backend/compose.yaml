@@ -11,6 +11,14 @@ x-app: &app
     ENABLE_REAL_AI_CALLS: ${ENABLE_REAL_AI_CALLS:-false}
     ALLOW_PAID_AI_CALLS: ${ALLOW_PAID_AI_CALLS:-false}
     WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+    STORAGE_ENDPOINT: http://storage:9000
+    # Host baked into signed URLs: must be reachable by the client (simulator/device), not the compose network.
+    STORAGE_PUBLIC_ENDPOINT: ${STORAGE_PUBLIC_ENDPOINT:-http://127.0.0.1:9000}
+    STORAGE_BUCKET: abt-private
+    STORAGE_ACCESS_KEY: abtlocal
+    STORAGE_SECRET_KEY: abtlocal_secret_only
+    STORAGE_ENSURE_BUCKET: "true"
+    MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
   stop_grace_period: 15s
 services:
   db:
@@ -28,11 +36,29 @@ services:
       interval: 2s
       timeout: 3s
       retries: 20
+  storage:
+    # Local S3-compatible store (pinned by digest). Development credentials only; never published beyond loopback.
+    image: chrislusf/seaweedfs@sha256:c2658820e763294a9e9de7b36c81e59b879e3459148351aee4e31a126ca64860
+    command: ["server", "-dir=/data", "-filer", "-s3", "-s3.port=9000", "-volume.max=64", "-master.volumeSizeLimitMB=128"]
+    environment:
+      AWS_ACCESS_KEY_ID: abtlocal
+      AWS_SECRET_ACCESS_KEY: abtlocal_secret_only
+    ports:
+      - "127.0.0.1:${STORAGE_PORT:-9000}:9000"
+    volumes:
+      - storage_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9000"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
   migrate:
     <<: *app
     command: ["/app/migrate"]
     depends_on:
       db:
+        condition: service_healthy
+      storage:
         condition: service_healthy
   api:
     <<: *app
@@ -54,3 +80,4 @@ services:
         condition: service_completed_successfully
 volumes:
   postgres_data:
+  storage_data:

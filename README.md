@@ -4,6 +4,7 @@
 - [Architecture review and M0 plan](Backend/docs/ARCHITECTURE.md)
 - [M0 verification](Backend/docs/M0_VERIFICATION.md)
 - `Docs/`: original product and technical specifications, preserved unchanged.
-- `iOS/`: reserved for the separately developed client.
+- [M1 verification](Backend/docs/M1_VERIFICATION.md)
+- `iOS/`: SwiftUI client (XcodeGen project; see `iOS/README.md`).
 
-Implementation is limited to M0. Later milestones require explicit authorization.
+Implementation is limited to M1 (identity and media). Later milestones require explicit authorization.

@@ -5,3 +5,6 @@
 Backend/bin/
 *.test
 coverage.out
+iOS/ABT.xcodeproj/xcuserdata/
+iOS/build/
+DerivedData/

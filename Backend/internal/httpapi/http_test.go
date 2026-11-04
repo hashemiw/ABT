@@ -25,7 +25,7 @@ func TestHealth(t *testing.T) {
 	}{{"live", "/health/live", "GET", true, 200}, {"ready", "/health/ready", "GET", false, 200}, {"unready", "/health/ready", "GET", true, 503}, {"method", "/health/live", "POST", false, 405}, {"missing", "/unknown", "GET", false, 404}} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
-			h := Handler(pingFunc(func(ctx context.Context) error {
+			h := Handler(Deps{DBTimeout: time.Second, Log: log, DB: pingFunc(func(ctx context.Context) error {
 				calls++
 				if _, ok := ctx.Deadline(); !ok {
 					t.Error("missing deadline")
@@ -34,7 +34,7 @@ func TestHealth(t *testing.T) {
 					return errors.New("secret database error")
 				}
 				return nil
-			}), time.Second, log)
+			})})
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
 			if w.Code != tc.want {
@@ -56,7 +56,7 @@ func TestHealth(t *testing.T) {
 	}
 }
 func TestReadinessTimeout(t *testing.T) {
-	h := Handler(pingFunc(func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }), 10*time.Millisecond, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h := Handler(Deps{DB: pingFunc(func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }), DBTimeout: 10 * time.Millisecond, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/health/ready", nil))
 	if w.Code != 503 {
