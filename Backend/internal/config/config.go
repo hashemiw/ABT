@@ -18,6 +18,21 @@ type Config struct {
 	SessionsPerMinute          int // per client IP
 	MediaSweepInterval         time.Duration
 	Media                      Media
+	AI                         AI
+	Gen                        Gen
+}
+
+// AI selects the image provider. Real (and therefore potentially paid) calls need three explicit opt-ins.
+type AI struct {
+	Provider               string // mock | gemini
+	EnableReal, AllowPaid  bool
+	GeminiKey, GeminiModel string
+	MockMode               string
+}
+
+type Gen struct {
+	Timeout, Lease                              time.Duration
+	MaxActive, MaxPerDay, MaxChars, MaxAttempts int
 }
 
 // Storage describes the private S3-compatible bucket. Endpoint is used by the
@@ -142,16 +157,83 @@ func Load(get func(string) string) (Config, error) {
 	if s.Bucket == "" || s.AccessKey == "" || s.SecretKey == "" {
 		return c, fmt.Errorf("STORAGE_BUCKET, STORAGE_ACCESS_KEY and STORAGE_SECRET_KEY are required")
 	}
-	if v := get("AI_PROVIDER"); v != "" && v != "mock" {
-		return c, fmt.Errorf("AI_PROVIDER must be mock in M0")
-	}
-	for _, name := range []string{"ENABLE_REAL_AI_CALLS", "ALLOW_PAID_AI_CALLS"} {
-		if v := get(name); v != "" {
-			b, err := strconv.ParseBool(v)
-			if err != nil || b {
-				return c, fmt.Errorf("%s must be false in M0", name)
-			}
-		}
+	if err := loadAI(get, &c); err != nil {
+		return c, err
 	}
 	return c, nil
+}
+
+func loadAI(get func(string) string, c *Config) error {
+	a := &c.AI
+	a.Provider = get("AI_PROVIDER")
+	if a.Provider == "" {
+		a.Provider = "mock"
+	}
+	for _, f := range []struct {
+		name string
+		to   *bool
+	}{{"ENABLE_REAL_AI_CALLS", &a.EnableReal}, {"ALLOW_PAID_AI_CALLS", &a.AllowPaid}} {
+		if v := get(f.name); v != "" {
+			b, err := strconv.ParseBool(v)
+			if err != nil {
+				return fmt.Errorf("%s must be true or false", f.name)
+			}
+			*f.to = b
+		}
+	}
+	a.GeminiKey, a.GeminiModel, a.MockMode = get("GEMINI_API_KEY"), get("GEMINI_IMAGE_MODEL"), get("MOCK_PROVIDER_MODE")
+	switch a.Provider {
+	case "mock":
+		// A mock deployment must not look like it could spend money.
+		if a.EnableReal || a.AllowPaid {
+			return fmt.Errorf("AI_PROVIDER=mock requires ENABLE_REAL_AI_CALLS=false and ALLOW_PAID_AI_CALLS=false")
+		}
+		switch a.MockMode {
+		case "", "success", "timeout", "failure", "invalid_output", "identical", "busy":
+		default:
+			return fmt.Errorf("MOCK_PROVIDER_MODE is not a known mode")
+		}
+	case "gemini":
+		if a.MockMode != "" {
+			return fmt.Errorf("MOCK_PROVIDER_MODE is only valid with AI_PROVIDER=mock")
+		}
+		// Free-tier image editing is not assumed: real calls are treated as paid and need both opt-ins.
+		if !a.EnableReal || !a.AllowPaid {
+			return fmt.Errorf("AI_PROVIDER=gemini requires ENABLE_REAL_AI_CALLS=true and ALLOW_PAID_AI_CALLS=true")
+		}
+		if a.GeminiKey == "" || a.GeminiModel == "" {
+			return fmt.Errorf("AI_PROVIDER=gemini requires GEMINI_API_KEY and GEMINI_IMAGE_MODEL")
+		}
+	default:
+		return fmt.Errorf("AI_PROVIDER must be mock or gemini")
+	}
+	g := &c.Gen
+	g.Timeout, g.Lease, g.MaxActive, g.MaxPerDay, g.MaxChars, g.MaxAttempts = 90*time.Second, 60*time.Second, 2, 30, 200, 3
+	for _, d := range []struct {
+		name string
+		to   *time.Duration
+		max  time.Duration
+	}{{"GENERATION_TIMEOUT", &g.Timeout, 5 * time.Minute}, {"JOB_LEASE", &g.Lease, 10 * time.Minute}} {
+		if v := get(d.name); v != "" {
+			x, err := time.ParseDuration(v)
+			if err != nil || x < time.Second || x > d.max {
+				return fmt.Errorf("%s must be a duration in [1s, %s]", d.name, d.max)
+			}
+			*d.to = x
+		}
+	}
+	for _, n := range []struct {
+		name string
+		to   *int
+		max  int
+	}{{"MAX_ACTIVE_GENERATIONS", &g.MaxActive, 20}, {"MAX_GENERATIONS_PER_DAY", &g.MaxPerDay, 1000}, {"MAX_INSTRUCTION_CHARS", &g.MaxChars, 1000}, {"MAX_GENERATION_ATTEMPTS", &g.MaxAttempts, 5}} {
+		if v := get(n.name); v != "" {
+			x, err := strconv.Atoi(v)
+			if err != nil || x < 1 || x > n.max {
+				return fmt.Errorf("%s must be 1..%d", n.name, n.max)
+			}
+			*n.to = x
+		}
+	}
+	return nil
 }

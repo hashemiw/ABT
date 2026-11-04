@@ -58,7 +58,7 @@ func TestPostgresMigrations(t *testing.T) {
 		}
 	}
 	var count int
-	if err = pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil || count != 1 {
+	if err = pool.QueryRow(ctx, "SELECT count(*) FROM schema_migrations").Scan(&count); err != nil || count != 2 {
 		t.Fatalf("versions=%d error=%v", count, err)
 	}
 	for _, table := range []string{"users", "sessions", "media_assets", "style_presets", "generations", "generation_jobs", "feedback"} {
