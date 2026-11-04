@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { Camera, Upload, CheckCircle2, AlertTriangle, Trash2, RefreshCw, Sparkles } from 'lucide-react';
-import { api } from '../api/client';
+import { api, SessionExpiredError } from '../api/client';
 import { MediaAsset } from '../types';
 
 export type UploadPhase =
@@ -10,7 +10,7 @@ export type UploadPhase =
   | { type: 'validating' }
   | { type: 'ready'; assetId: string; downloadUrl?: string }
   | { type: 'deleting' }
-  | { type: 'failed'; message: string; retryable: boolean };
+  | { type: 'failed'; message: string; retryable: boolean; sessionExpired?: boolean };
 
 interface PhotoUploadSectionProps {
   phase: UploadPhase;
@@ -18,6 +18,9 @@ interface PhotoUploadSectionProps {
   onPhaseChange: (phase: UploadPhase) => void;
   onPreviewChange: (url: string | null) => void;
   onAssetReady: (asset: MediaAsset | null) => void;
+  /** Session rejected: parent must drop session state. A new session is created only on explicit user action. */
+  onSessionExpired: () => void;
+  onNewSession: () => void;
 }
 
 // Built-in curated sample portraits for instant testing
@@ -25,17 +28,14 @@ const SAMPLE_PORTRAITS = [
   {
     name: 'Classic Portrait',
     desc: 'Editorial portrait in natural lighting',
-    url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=800&q=80'
   },
   {
     name: 'Casual Street',
     desc: 'Full-profile relaxed streetwear pose',
-    url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=800&q=80'
   },
   {
     name: 'Business Style',
     desc: 'Modern professional studio shot',
-    url: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&w=800&q=80'
   }
 ];
 
@@ -142,59 +142,69 @@ export const PhotoUploadSection: React.FC<PhotoUploadSectionProps> = ({
   previewUrl,
   onPhaseChange,
   onPreviewChange,
-  onAssetReady
+  onAssetReady,
+  onSessionExpired,
+  onNewSession
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [lastBlob, setLastBlob] = useState<{ blob: Blob; filename: string } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const inFlight = useRef(false); // blocks double clicks before React re-renders
 
   const isBusy = ['preparing', 'uploading', 'validating', 'deleting'].includes(phase.type);
 
-  // Process raw photo data:
-  // 1. Prepare / validate preview
-  // Prepare preview, then: upload-intent -> direct PUT to storage -> complete -> GET stored copy.
+  // Failures are shown, never converted to success. An expired session stops the operation; nothing is replayed.
+  const fail = (err: any) => {
+    if (err instanceof SessionExpiredError) {
+      onPreviewChange(null);
+      onAssetReady(null);
+      onSessionExpired();
+      onPhaseChange({ type: 'failed', message: err.message, retryable: false, sessionExpired: true });
+      return;
+    }
+    onPhaseChange({ type: 'failed', message: err?.message || 'We could not process that photo.', retryable: true });
+  };
+
+  // upload-intent -> direct PUT to storage -> complete -> GET stored copy.
   const handlePhotoSelected = async (fileOrBlob: Blob, filename: string) => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setNotice(null);
+    let assetId: string | null = null;
     try {
       setLastBlob({ blob: fileOrBlob, filename });
       onPhaseChange({ type: 'preparing' });
-
-      // Local preview URL
       const localUrl = URL.createObjectURL(fileOrBlob);
       onPreviewChange(localUrl);
 
-      // Validate size (max 10MB)
       if (fileOrBlob.size > 10 * 1024 * 1024) {
-        onPhaseChange({
-          type: 'failed',
-          message: 'This photo exceeds the 10MB limit. Please choose a smaller photo.',
-          retryable: false
-        });
+        onPhaseChange({ type: 'failed', message: 'This photo exceeds the 10MB limit. Please choose a smaller photo.', retryable: false });
         return;
       }
-
-      onPhaseChange({ type: 'uploading' });
-
       const contentType = fileOrBlob.type;
       if (contentType !== 'image/jpeg' && contentType !== 'image/png') {
         onPhaseChange({ type: 'failed', message: 'Only JPEG or PNG photos are supported.', retryable: false });
         return;
       }
+
+      onPhaseChange({ type: 'uploading' });
       const intent = await api.createUploadIntent(filename, contentType, fileOrBlob.size);
+      assetId = intent.assetId;
       await api.uploadBytes(intent.upload.url, intent.upload.method, intent.upload.headers, fileOrBlob);
       onPhaseChange({ type: 'validating' });
-      await api.completeMedia(intent.assetId);
-      const asset = await api.getMedia(intent.assetId);
+      await api.completeMedia(assetId);
+      const asset = await api.getMedia(assetId);
       // Show the stored copy, not the local file, so the preview proves the round trip.
       URL.revokeObjectURL(localUrl);
       onPreviewChange(asset.download_url);
       onPhaseChange({ type: 'ready', assetId: asset.id, downloadUrl: asset.download_url || undefined });
       onAssetReady(asset);
     } catch (err: any) {
-      console.error('Photo processing failed:', err);
-      onPhaseChange({
-        type: 'failed',
-        message: err.message || 'We could not process that photo. Please try a different image.',
-        retryable: true
-      });
+      // Best-effort cleanup of the half-finished asset; the user still sees the original error.
+      if (assetId && !(err instanceof SessionExpiredError)) api.deleteMedia(assetId).catch(() => {});
+      fail(err);
+    } finally {
+      inFlight.current = false;
     }
   };
 
@@ -204,42 +214,30 @@ export const PhotoUploadSection: React.FC<PhotoUploadSectionProps> = ({
     handlePhotoSelected(file, file.name);
   };
 
-  const handleSelectSample = async (sampleUrl: string, sampleName: string) => {
-    try {
-      onPhaseChange({ type: 'preparing' });
-      const resp = await fetch(sampleUrl, { mode: 'cors' });
-      if (!resp.ok) throw new Error('Fetch failed');
-      const blob = await resp.blob();
-      await handlePhotoSelected(blob, `${sampleName.toLowerCase().replace(/\s+/g, '_')}.jpg`);
-    } catch {
-      // Fallback: create self-contained canvas sample portrait to avoid CORS issues
-      try {
-        const fallbackBlob = await createSamplePortraitBlob(sampleName);
-        await handlePhotoSelected(fallbackBlob, `${sampleName.toLowerCase().replace(/\s+/g, '_')}.jpg`);
-      } catch (err: any) {
-        onPhaseChange({
-          type: 'failed',
-          message: 'Could not load sample. Please upload a photo from your device.',
-          retryable: true
-        });
-      }
-    }
+  // Samples are generated locally (synthetic, non-personal); nothing is fetched from third parties.
+  const handleSelectSample = async (sampleName: string) => {
+    const blob = await createSamplePortraitBlob(sampleName);
+    await handlePhotoSelected(blob, `${sampleName.toLowerCase().replace(/\s+/g, '_')}.jpg`);
   };
 
   const handleDelete = async () => {
-    if (phase.type !== 'ready') return;
+    if (phase.type !== 'ready' || inFlight.current) return;
+    inFlight.current = true;
+    const ready = phase;
+    setNotice(null);
     try {
-      const assetId = phase.assetId;
       onPhaseChange({ type: 'deleting' });
-      await api.deleteMedia(assetId);
-      // Reset
+      await api.deleteMedia(ready.assetId);
       onPreviewChange(null);
       setLastBlob(null);
       onAssetReady(null);
       onPhaseChange({ type: 'idle' });
     } catch (err: any) {
-      onPhaseChange({ type: 'ready', assetId: phase.assetId, downloadUrl: phase.downloadUrl });
-      alert(err.message || 'Failed to delete photo.');
+      if (err instanceof SessionExpiredError) return fail(err);
+      onPhaseChange(ready); // still stored: keep it visible and let the user retry
+      setNotice(`Delete failed: ${err?.message || 'unknown error'}. Click Delete Photo to try again.`);
+    } finally {
+      inFlight.current = false;
     }
   };
 
@@ -343,12 +341,21 @@ export const PhotoUploadSection: React.FC<PhotoUploadSectionProps> = ({
           </div>
         )}
 
+        {notice && <p role="alert" className="text-xs text-red-300 mb-2">{notice}</p>}
         {phase.type === 'failed' && (
           <div className="bg-red-950/40 border border-red-800/40 rounded-xl p-3 flex items-center justify-between text-xs">
             <div className="flex items-center gap-2.5 text-red-300">
               <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
               <span>{phase.message}</span>
             </div>
+            {phase.sessionExpired && (
+              <button
+                onClick={onNewSession}
+                className="px-2.5 py-1 rounded bg-red-800/40 hover:bg-red-800/60 text-red-200 font-medium text-xs cursor-pointer"
+              >
+                Start New Session
+              </button>
+            )}
             {phase.retryable && (
               <button
                 onClick={handleRetry}
@@ -395,7 +402,7 @@ export const PhotoUploadSection: React.FC<PhotoUploadSectionProps> = ({
             {SAMPLE_PORTRAITS.map(sample => (
               <button
                 key={sample.name}
-                onClick={() => handleSelectSample(sample.url, sample.name)}
+                onClick={() => handleSelectSample(sample.name)}
                 disabled={isBusy}
                 className="px-2.5 py-1 rounded bg-slate-800/80 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-700/60 text-[11px] transition-colors cursor-pointer"
               >

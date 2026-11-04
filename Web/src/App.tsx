@@ -75,7 +75,7 @@ export function App() {
             ) : isBackendOnline ? (
               <>
                 <Server className="w-3.5 h-3.5 text-emerald-400" />
-                <span><strong>Go backend connected.</strong>{initError ? ` Session failed: ${initError}` : ' Sessions, uploads and deletion run against the real API.'}</span>
+                <span><strong>Go backend connected.</strong>{initError ? ` Session failed: ${initError}` : session ? ' Sessions, uploads and deletion run against the real API.' : ' No active session: use the reset button in the header to start a new one.'}</span>
               </>
             ) : (
               <>
@@ -117,6 +117,8 @@ export function App() {
             onPhaseChange={setPhase}
             onPreviewChange={setPreviewUrl}
             onAssetReady={setReadyAsset}
+            onSessionExpired={() => { setSession(null); setReadyAsset(null); }}
+            onNewSession={handleResetSession}
           />
 
           {/* Step 2: Style Preset Selection */}

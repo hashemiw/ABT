@@ -2,28 +2,43 @@ import { UserSession, UploadIntent, MediaAsset, Generation, GenerationHistoryIte
 
 const SESSION_STORAGE_KEY = 'abt_session_v2';
 
-class APIClient {
+type Store = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+
+/** The token was rejected (or is missing/expired). The caller must stop and ask the user; nothing is retried. */
+export class SessionExpiredError extends Error {
+  constructor() {
+    super('Your session has expired. Photos from the previous session are no longer accessible.');
+    this.name = 'SessionExpiredError';
+  }
+}
+
+export class ApiError extends Error {
+  constructor(public status: number, public code: string | undefined, message: string) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+export class APIClient {
   private session: UserSession | null = null;
   private sessionPromise: Promise<UserSession> | null = null;
   private isBackendOnline: boolean | null = null;
 
-  constructor() {
+  // base and store are injectable so tests can target a real Go server from Node.
+  constructor(private base = '', private store: Store | null = typeof window === 'undefined' ? null : window.localStorage) {
     this.loadSession();
   }
 
   private loadSession(): void {
     try {
-      const saved = localStorage.getItem(SESSION_STORAGE_KEY);
+      const saved = this.store?.getItem(SESSION_STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved) as UserSession;
-        if (new Date(parsed.expiresAt).getTime() > Date.now() + 60000) {
-          this.session = parsed;
-        } else {
-          localStorage.removeItem(SESSION_STORAGE_KEY);
-        }
+        if (new Date(parsed.expiresAt).getTime() > Date.now() + 60000) this.session = parsed;
+        else this.store?.removeItem(SESSION_STORAGE_KEY);
       }
     } catch {
-      localStorage.removeItem(SESSION_STORAGE_KEY);
+      this.store?.removeItem(SESSION_STORAGE_KEY);
     }
   }
 
@@ -31,108 +46,82 @@ class APIClient {
     return this.session;
   }
 
+  /** Drop the token. Assets owned by it become unreachable from this client. */
   public clearSession(): void {
     this.session = null;
-    localStorage.removeItem(SESSION_STORAGE_KEY);
+    try { this.store?.removeItem(SESSION_STORAGE_KEY); } catch { /* storage unavailable */ }
   }
 
+  /** True only for a real ABT API: HTTP 200 and exactly {"status":"ok"}. Anything else (text, other server) is offline. */
   public async checkBackendHealth(): Promise<boolean> {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), 2000);
     try {
-      const controller = new AbortController();
-      const id = setTimeout(() => controller.abort(), 2000);
-      const res = await fetch('/health/live', { signal: controller.signal });
-      clearTimeout(id);
-      if (!res.ok) {
-        this.isBackendOnline = false;
-        return false;
-      }
-      const data = await res.json().catch(() => null);
-      const isOnline = !!data && data.status === 'ok' && data.backend_connected !== false;
-      this.isBackendOnline = isOnline;
-      return isOnline;
+      const res = await fetch(`${this.base}/health/live`, { signal: controller.signal });
+      const data = res.ok ? await res.json().catch(() => null) : null;
+      this.isBackendOnline = !!data && data.status === 'ok';
     } catch {
       this.isBackendOnline = false;
-      return false;
+    } finally {
+      clearTimeout(id);
     }
+    return this.isBackendOnline;
   }
 
   public getBackendStatus(): boolean | null {
     return this.isBackendOnline;
   }
 
+  /** Returns the current session or creates one. Only called at startup or on explicit user action, never mid-operation. */
   public async ensureSession(): Promise<UserSession> {
-    if (this.session && new Date(this.session.expiresAt).getTime() > Date.now() + 60000) {
-      return this.session;
-    }
-    if (this.sessionPromise) {
-      return this.sessionPromise;
-    }
-
-    this.sessionPromise = (async () => {
-      try {
-        const res = await fetch('/v1/sessions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({})
-        });
-
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err.error?.message || `Failed to create session: ${res.status}`);
-        }
-        this.isBackendOnline = true;
-
-        const data = await res.json();
-        const newSession: UserSession = {
-          userId: data.user.id,
-          token: data.session.token,
-          expiresAt: data.session.expires_at
-        };
-
-        this.session = newSession;
-        this.isBackendOnline = true;
-        localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(newSession));
-        return newSession;
-      } catch (err) {
-        this.isBackendOnline = false;
-        throw err;
-      } finally {
-        this.sessionPromise = null;
-      }
-    })();
-
+    if (this.session && new Date(this.session.expiresAt).getTime() > Date.now() + 60000) return this.session;
+    this.clearSession();
+    this.sessionPromise ??= this.createSession().finally(() => { this.sessionPromise = null; });
     return this.sessionPromise;
   }
 
-  private async authorizedFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
-    const session = await this.ensureSession();
+  private async createSession(): Promise<UserSession> {
+    const res = await this.request('/v1/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const data = await res.json();
+    const session: UserSession = { userId: data.user.id, token: data.session.token, expiresAt: data.session.expires_at };
+    this.session = session;
+    try { this.store?.setItem(SESSION_STORAGE_KEY, JSON.stringify(session)); } catch { /* storage unavailable */ }
+    return session;
+  }
+
+  private async request(path: string, init: RequestInit): Promise<Response> {
+    let res: Response;
+    try {
+      res = await fetch(this.base + path, init);
+    } catch (err: any) {
+      this.isBackendOnline = false;
+      throw new Error(`Cannot reach the ABT API: ${err.message}. Is the Go backend running?`);
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new ApiError(res.status, body.error?.code, body.error?.message || `Request failed (${res.status})`);
+    }
+    return res;
+  }
+
+  private async authorizedFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+    const session = this.session;
+    if (!session || new Date(session.expiresAt).getTime() <= Date.now()) {
+      this.clearSession();
+      throw new SessionExpiredError();
+    }
     const headers = new Headers(options.headers || {});
     headers.set('Authorization', `Bearer ${session.token}`);
     headers.set('Accept', 'application/json');
-
-    let response: Response;
     try {
-      response = await fetch(url, { ...options, headers });
-    } catch (err: any) {
-      this.isBackendOnline = false;
-      throw new Error(`Cannot reach the ABT API (${url}): ${err.message}. Is the Go backend running?`);
+      return await (await this.request(path, { ...options, headers })).json();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        this.clearSession();
+        throw new SessionExpiredError();
+      }
+      throw err;
     }
-
-    // Handle session expired / revoked (401)
-    if (response.status === 401) {
-      this.clearSession();
-      const freshSession = await this.ensureSession();
-      headers.set('Authorization', `Bearer ${freshSession.token}`);
-      response = await fetch(url, { ...options, headers });
-    }
-
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      const message = errData.error?.message || `Request failed with code ${response.status}`;
-      throw new Error(message);
-    }
-
-    return response.json();
   }
 
   // Upload lifecycle
