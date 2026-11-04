@@ -3,16 +3,18 @@
 React 19 + Vite + Tailwind client for the ABT Go backend. It talks only to the Go API; there is no Node backend and no AI key in the browser.
 UI originated from a Gemini-generated prototype; its Express server, in-memory persistence, offline session fallback and canvas "mock demo" were removed.
 
-## Status (M1)
+## Status
 
 | Feature | State |
 |---|---|
-| Anonymous session (`POST /v1/sessions`) | real |
-| Upload intent -> direct PUT to storage -> complete -> show stored photo | real |
-| Delete (`DELETE /v1/media/{id}`) | real |
-| Generation, presets, history, feedback | **not implemented in Go yet (M2)**. Generate button is disabled; the preset list is a static preview (`src/presets.ts`). `GenerationViewer`/`HistoryDrawer` and the API wrappers in `src/api/client.ts` are kept for M2 but not mounted. |
+| Anonymous session, upload intent -> direct PUT -> complete -> show stored copy -> delete | real (M1) |
+| Styles | fetched from `GET /v1/styles/presets` (authenticated) |
+| Generate | `POST /v1/generations` with an `Idempotency-Key`; a retry of the *same* request reuses its key, a changed request gets a new one |
+| Progress | polling with backoff, stops on a terminal state, after 3 min, or after 5 consecutive errors, then offers "Check again" / Cancel. No progress percentage is shown. |
+| Result | Before = stored source, After = stored result, with a slider. A **mock** result is labelled "MOCK PROVIDER" |
+| Not built | history list, refinement, feedback |
 
-If the backend is unreachable the UI says so; nothing falls back to fake success.
+**Mock vs real:** the default worker uses the offline mock provider. It tints the photo and adds a striped banner to prove the pipeline; it does **not** edit clothing. Real Gemini output only appears if the Go worker is explicitly configured for it (see `Backend/README.md`); the web app never sees a provider key.
 
 ## Run locally
 
@@ -43,13 +45,13 @@ Use `http://127.0.0.1:3000` (not a LAN address) so signed storage URLs on `127.0
 ```bash
 npm run lint        # tsc --noEmit (src, e2e)
 npm test            # MOCKED unit tests (stubbed fetch): health parsing, 401 handling, "{}" body, error messages
-npm run test:e2e    # REAL end-to-end: needs `docker compose up` in Backend/ (Go + PostgreSQL + storage)
+npm run test:e2e    # REAL end-to-end: needs `docker compose up` in Backend/ (Go + PostgreSQL + storage + mock worker)
 ```
 
 The e2e suite runs the client from Node against the live API and storage with synthetic fixtures (`e2e/fixtures/`): JPEG and PNG intent -> PUT -> complete (`{}`) -> stored copy -> ownership isolation -> delete -> 404, plus failure cases. It fails (does not skip) when the stack is down and deletes the assets it creates. It runs outside a browser, so real browser CORS is only covered by an OPTIONS preflight assertion plus manual checks. Set `ABT_API_URL` to target another API.
 
 ## Known limits
 
-- Generation, presets, history and feedback do not exist in Go yet (M2). The Generate button is disabled with an explanation; styles shown are a static preview (`src/presets.ts`). `GenerationViewer`/`HistoryDrawer` and API wrappers are kept for M2 but not mounted.
+- If no worker is running, a generation stays queued; the UI says so after polling stops. It never shows a fake result.
 - Session token lives in `localStorage` (anonymous session); revisit when accounts exist.
 - No browser-automation (Playwright) test yet; UI flows were verified manually in a browser.

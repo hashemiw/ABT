@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"abt/backend/internal/config"
+	"abt/backend/internal/generation"
 	"abt/backend/internal/httpapi"
 	"abt/backend/internal/identity"
 	"abt/backend/internal/media"
@@ -36,6 +37,7 @@ type env struct {
 	db    *pgxpool.Pool
 	st    *storage.Client
 	media *media.Service
+	gcfg  generation.Config
 }
 
 func newEnv(t *testing.T, tune func(*config.Media), sessionsPerMinute int) *env {
@@ -76,16 +78,24 @@ func newEnv(t *testing.T, tune func(*config.Media), sessionsPerMinute int) *env 
 		tune(&mc)
 	}
 	ms := media.New(db, st, mc)
+	gc := generation.Config{MaxActive: 3, MaxPerDay: 50, MaxInstruction: 100, MaxAttempts: 3, Lease: time.Second, ProviderTimeout: 5 * time.Second,
+		RetryBackoff: 10 * time.Millisecond, PollEvery: 20 * time.Millisecond, DownloadTTL: time.Minute, MaxSourceBytes: mc.MaxUploadBytes, MaxOutputBytes: 8 << 20,
+		MaxPixels: mc.MaxPixels, MinSide: mc.MinSide}
 	h := httpapi.Handler(httpapi.Deps{DB: db, DBTimeout: time.Second, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Identity: identity.New(db, time.Hour), Media: ms, SessionsPerMinute: sessionsPerMinute})
+		Identity: identity.New(db, time.Hour), Media: ms, Generation: generation.New(db, st, gc), SessionsPerMinute: sessionsPerMinute})
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return &env{t, srv, db, st, ms}
+	return &env{t, srv, db, st, ms, gc}
 }
 
 type user struct{ id, token string }
 
 func (e *env) call(method, path, token string, body any) (int, map[string]any) {
+	e.t.Helper()
+	return e.callWith(method, path, token, nil, body)
+}
+
+func (e *env) callWith(method, path, token string, hdr map[string]string, body any) (int, map[string]any) {
 	e.t.Helper()
 	var rd io.Reader
 	if s, ok := body.(string); ok {
@@ -97,6 +107,9 @@ func (e *env) call(method, path, token string, body any) (int, map[string]any) {
 	req, _ := http.NewRequest(method, e.srv.URL+path, rd)
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for k, v := range hdr {
+		req.Header.Set(k, v)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

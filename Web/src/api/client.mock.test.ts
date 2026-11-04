@@ -89,3 +89,28 @@ describe('media', () => {
     expect(err.message).not.toContain('SECRET');
   });
 });
+
+describe('generation requests', () => {
+  it('sends the caller-supplied Idempotency-Key and a body without unknown fields', async () => {
+    const f = vi.fn();
+    const c = await loggedIn(f);
+    f.mockResolvedValue(json({ id: 'g1', status: 'queued' }, 202));
+    await c.createGeneration('a1', 'old_money', 'navy', 'key-123');
+    const init = f.mock.calls[0][1];
+    expect(new Headers(init.headers).get('Idempotency-Key')).toBe('key-123');
+    expect(JSON.parse(init.body)).toEqual({ source_asset_id: 'a1', preset_id: 'old_money', instruction: 'navy' });
+  });
+  it('surfaces a 409 idempotency conflict instead of swallowing it', async () => {
+    const f = vi.fn();
+    const c = await loggedIn(f);
+    f.mockResolvedValue(json({ error: { code: 'IDEMPOTENCY_CONFLICT', message: 'used', request_id: 'r' } }, 409));
+    await expect(c.createGeneration('a1', 'p', '', 'k')).rejects.toMatchObject({ status: 409, code: 'IDEMPOTENCY_CONFLICT' });
+  });
+  it('401 while polling expires the session and does not retry', async () => {
+    const f = vi.fn();
+    const c = await loggedIn(f);
+    f.mockResolvedValue(json({ error: { code: 'UNAUTHORIZED', message: 'x', request_id: 'r' } }, 401));
+    await expect(c.getGeneration('g1')).rejects.toBeInstanceOf(SessionExpiredError);
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+});

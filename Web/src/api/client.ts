@@ -1,4 +1,4 @@
-import { UserSession, UploadIntent, MediaAsset, Generation, GenerationHistoryItem } from '../types';
+import { UserSession, UploadIntent, MediaAsset, Generation, GenerationStatus, StylePreset } from '../types';
 
 const SESSION_STORAGE_KEY = 'abt_session_v2';
 
@@ -168,49 +168,26 @@ export class APIClient {
     });
   }
 
-  // Generations
-  public async createGeneration(sourceAssetId: string, presetId: string, instruction?: string, parentGenerationId?: string | null): Promise<{ id: string; status: string; status_url: string }> {
-    const idempotencyKey = crypto.randomUUID();
+  // Generation (M2)
+  public async getPresets(): Promise<StylePreset[]> {
+    return (await this.authorizedFetch<{ data: StylePreset[] }>('/v1/styles/presets')).data;
+  }
+
+  /** The caller owns the idempotency key so a retry of the same request reuses it. */
+  public async createGeneration(sourceAssetId: string, presetId: string, instruction: string, idempotencyKey: string): Promise<{ id: string; status: GenerationStatus }> {
     return this.authorizedFetch('/v1/generations', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Idempotency-Key': idempotencyKey
-      },
-      body: JSON.stringify({
-        source_asset_id: sourceAssetId,
-        preset_id: presetId,
-        instruction: instruction || '',
-        parent_generation_id: parentGenerationId || null
-      })
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify({ source_asset_id: sourceAssetId, preset_id: presetId, instruction })
     });
   }
 
-  public async getGeneration(generationId: string): Promise<Generation> {
-    return this.authorizedFetch<Generation>(`/v1/generations/${generationId}`);
+  public async getGeneration(id: string): Promise<Generation> {
+    return this.authorizedFetch<Generation>(`/v1/generations/${id}`);
   }
 
-  public async listGenerations(): Promise<GenerationHistoryItem[]> {
-    const data = await this.authorizedFetch<{ data: GenerationHistoryItem[] }>('/v1/generations');
-    return data.data;
-  }
-
-  public async cancelGeneration(generationId: string): Promise<{ id: string; status: string }> {
-    return this.authorizedFetch(`/v1/generations/${generationId}/cancel`, {
-      method: 'POST'
-    });
-  }
-
-  public async submitFeedback(generationId: string, rating: number, comment?: string): Promise<void> {
-    await this.authorizedFetch('/v1/feedback', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        generation_id: generationId,
-        rating,
-        comment
-      })
-    });
+  public async cancelGeneration(id: string): Promise<{ id: string; status: GenerationStatus }> {
+    return this.authorizedFetch(`/v1/generations/${id}/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
   }
 }
 

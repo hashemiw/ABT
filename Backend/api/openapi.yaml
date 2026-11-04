@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
   title: AI Beauty Tool API
-  version: 0.2.0
+  version: 0.3.0
   description: |
-    Implemented through M1: health, anonymous sessions and media. Generation, presets and
-    feedback endpoints from the contract specification arrive in later milestones.
+    Implemented through M2 (first slice): health, anonymous sessions, media, presets, and generation create/get/cancel.
+    History listing, refinement (parent_generation_id) and feedback arrive later.
     Timestamps are RFC 3339 UTC. Every response carries X-Request-ID.
 servers:
   - url: http://127.0.0.1:8080
@@ -189,6 +189,104 @@ paths:
         '401': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
         '503': {$ref: '#/components/responses/Error'}
+  /v1/styles/presets:
+    get:
+      operationId: listPresets
+      summary: Active style presets (prompt templates are never returned)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, category, description]
+                      properties: {id: {type: string}, name: {type: string}, category: {type: string}, description: {type: string}}
+        '401': {$ref: '#/components/responses/Error'}
+  /v1/generations:
+    post:
+      operationId: createGeneration
+      summary: Queue an image edit of an owned, ready photo
+      description: |
+        Idempotent per user by `Idempotency-Key` (1-128 printable ASCII). Same key and same request returns the original
+        generation (202, current status); same key with a different request returns 409 IDEMPOTENCY_CONFLICT.
+        Generation row and job are created in one transaction. Idempotency records are kept as long as the generation row
+        (no purge yet). Limits: active generations and generations per 24h per user (429 GENERATION_LIMIT_REACHED).
+        `parent_generation_id` must be null/absent for now (refinement is not implemented; 422).
+      parameters:
+        - {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 1, maxLength: 128}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_asset_id, preset_id]
+              additionalProperties: false
+              properties:
+                source_asset_id: {type: string, format: uuid}
+                preset_id: {type: string}
+                instruction: {type: string, description: 'Optional, length-limited (MAX_INSTRUCTION_CHARS), no control characters.'}
+                parent_generation_id: {type: [string, 'null']}
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, status, created_at, status_url]
+                properties: {id: {type: string, format: uuid}, status: {enum: [queued, processing, completed, failed, canceled]}, created_at: {type: string, format: date-time}, status_url: {type: string}}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+  /v1/generations/{id}:
+    get:
+      operationId: getGeneration
+      summary: 'Generation state; result with a short-lived download URL when completed'
+      description: |
+        No progress percentage is ever reported. `result.is_mock` is true when the mock provider produced the image
+        (a pipeline test, not an AI edit). A result whose asset the user deleted is returned as null.
+        Failed generations carry `error.code`: PROVIDER_FAILURE, PROVIDER_TIMEOUT, PROVIDER_OUTCOME_UNKNOWN, PROVIDER_REFUSED,
+        PROVIDER_NO_IMAGE, PROVIDER_INVALID_OUTPUT, PROVIDER_UNAVAILABLE, SOURCE_UNAVAILABLE, STORAGE_FAILURE.
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, status, created_at]
+                properties:
+                  id: {type: string}
+                  status: {enum: [queued, processing, completed, failed, canceled]}
+                  preset_id: {type: string}
+                  created_at: {type: string, format: date-time}
+                  started_at: {type: [string, 'null'], format: date-time}
+                  completed_at: {type: [string, 'null'], format: date-time}
+                  result:
+                    type: [object, 'null']
+                    properties: {asset_id: {type: string}, download_url: {type: string}, download_url_expires_at: {type: string}, provider: {type: string}, model: {type: string}, is_mock: {type: boolean}}
+                  error:
+                    type: [object, 'null']
+                    properties: {code: {type: string}, message: {type: string}}
+        '404': {$ref: '#/components/responses/Error'}
+  /v1/generations/{id}/cancel:
+    post:
+      operationId: cancelGeneration
+      summary: 'Cancel (idempotent). Queued: effective. Processing: best-effort; the provider may still run and bill.'
+      parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses:
+        '200': {description: Current state, content: {application/json: {schema: {type: object, properties: {id: {type: string}, status: {type: string}}}}}}
+        '404': {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:
     bearerAuth: {type: http, scheme: bearer}

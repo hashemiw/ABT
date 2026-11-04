@@ -1,6 +1,6 @@
 # AI Beauty Tool backend — M1
 
-Go modular monolith with independent API and worker processes. M0 provided configuration, PostgreSQL pooling, explicit migrations, health endpoints, JSON logs and graceful shutdown. **M1 adds** anonymous sessions (hashed credentials), private S3-compatible storage, upload intents with signed URLs, server-side image validation/normalization, authorized metadata/download access, and an idempotent deletion lifecycle. The worker only runs media/session cleanup. No generation, job processing, image providers or external AI calls exist. See [M1 verification](docs/M1_VERIFICATION.md).
+Go modular monolith with independent API and worker processes. M0 provided configuration, PostgreSQL pooling, explicit migrations, health endpoints, JSON logs and graceful shutdown. **M1 adds** anonymous sessions (hashed credentials), private S3-compatible storage, upload intents with signed URLs, server-side image validation/normalization, authorized metadata/download access, and an idempotent deletion lifecycle. **M2 (first slice)** adds style presets, generation create/get/cancel with per-user idempotency, a fenced job worker, a deterministic offline mock provider and a Gemini adapter that is disabled by default and has never been called for real. See [M1](docs/M1_VERIFICATION.md) and [M2 verification](docs/M2_VERIFICATION.md).
 
 ## Local environment
 
@@ -30,7 +30,7 @@ go run ./cmd/api
 go run ./cmd/worker
 ```
 
-Go programs read the environment, not `.env` files. Compose uses `.env` for interpolation but deliberately uses the internal `db:5432` URL. Never commit real secrets. GEMINI variables are reserved and unused; there is no configured image model or provider credential requirement.
+Go programs read the environment, not `.env` files. Compose uses `.env` for interpolation but deliberately uses the internal `db:5432` URL. Never commit real secrets. GEMINI variables are only read when `AI_PROVIDER=gemini` (see AI safety below); the default is the offline mock and needs no credentials.
 
 ## Configuration
 
@@ -55,10 +55,13 @@ Go programs read the environment, not `.env` files. Compose uses `.env` for inte
 |ABANDONED_UPLOAD_AFTER|1h, then cleaned up|
 |MEDIA_SWEEP_INTERVAL|30s worker cleanup cadence|
 |MAX_CONCURRENT_DECODERS|2 concurrent image decodes per API process|
-|AI_PROVIDER|mock only until M3|
-|ENABLE_REAL_AI_CALLS|false; true is rejected in M0|
-|ALLOW_PAID_AI_CALLS|false; true is rejected in M0|
-|GEMINI_API_KEY / GEMINI_IMAGE_MODEL|Unused placeholders for later integration|
+|AI_PROVIDER|`mock` (default) or `gemini`|
+|ENABLE_REAL_AI_CALLS|default false; true only valid with `gemini`|
+|ALLOW_PAID_AI_CALLS|default false; true only valid with `gemini`. Real calls are treated as paid.|
+|GEMINI_API_KEY / GEMINI_IMAGE_MODEL|required for `gemini`; no default model; key only via environment|
+|MOCK_PROVIDER_MODE|mock only: success (default), failure, timeout, invalid_output, identical, busy|
+|GENERATION_TIMEOUT, JOB_LEASE|default 90s / 60s|
+|MAX_ACTIVE_GENERATIONS, MAX_GENERATIONS_PER_DAY, MAX_INSTRUCTION_CHARS, MAX_GENERATION_ATTEMPTS|defaults 2 / 30 / 200 / 3|
 |POSTGRES_PORT / API_PORT / STORAGE_PORT|Compose-only host ports, 5432 / 8080 / 9000|
 
 Startup checks database connectivity with a deadline and fails on invalid configuration. Readiness pings PostgreSQL per request (503 on failure); liveness is independent (200). Neither checks storage or AI. Migrations are an explicit deployment prerequisite, not a readiness side effect. API logs include request ID, status and latency; dependency failures use safe messages. SIGINT/SIGTERM drains HTTP requests, force-closes after the deadline, and closes the pool. Container stop grace must exceed the configured shutdown timeout.
@@ -83,4 +86,8 @@ Ordinary tests skip PostgreSQL/storage integration when the TEST_* variables are
 
 `cmd/migrate` embeds versioned SQL from `migrations/`, serializes concurrent runs with a transaction advisory lock, and validates applied checksums. All pending versions and their ledger entries commit atomically. Never edit an applied migration; add a new numbered migration. The down file is a manual destructive rollback for disposable environments; no automatic downgrade command exists.
 
-`internal/config` validates environment; `internal/database` owns pooling; `internal/httpapi` owns HTTP and shutdown; `internal/app` wires processes. Domain packages: `identity` (sessions), `media` (uploads, validation, deletion), `storage` (minimal SigV4 S3 client, no SDK), `apperr` (client-safe errors). `api/openapi.yaml` covers the implemented surface (health, sessions, media). See [architecture review](docs/ARCHITECTURE.md) for schema deviations, future provider boundaries and remaining decisions, and [verification report](docs/M0_VERIFICATION.md) for observed results. Original specifications remain in `../Docs/`.
+`internal/config` validates environment; `internal/database` owns pooling; `internal/httpapi` owns HTTP and shutdown; `internal/app` wires processes. Domain packages: `identity` (sessions), `media` (uploads, validation, deletion), `storage` (minimal SigV4 S3 client, no SDK), `apperr` (client-safe errors). `api/openapi.yaml` covers the implemented surface (health, sessions, media, presets, generations). See [architecture review](docs/ARCHITECTURE.md) for schema deviations, future provider boundaries and remaining decisions, and [verification report](docs/M0_VERIFICATION.md) for observed results. Original specifications remain in `../Docs/`.
+
+## AI safety (M2)
+
+Startup rejects unsafe combinations: `mock` with either real flag, `gemini` without **both** `ENABLE_REAL_AI_CALLS=true` and `ALLOW_PAID_AI_CALLS=true`, or without key and model. Enabling real calls never implies paid calls. Tests never reach a vendor. To run the offline mock path, change nothing: `docker compose up -d --build`, and the worker logs `"provider":"mock","real_ai_calls":false`.
